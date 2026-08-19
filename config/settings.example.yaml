@@ -1,0 +1,66 @@
+# GMOコイン自動売買Bot 設定ファイル
+# このファイルをコピーして config/settings.yaml を作成してください
+# cp config/settings.example.yaml config/settings.yaml
+
+exchange:
+  api_key: "YOUR_API_KEY"
+  api_secret: "YOUR_API_SECRET"
+  symbols:
+    - "BTC_JPY"
+    # - "ETH_JPY"  # サブ銘柄（必要に応じて有効化）
+
+strategy:
+  # 相場状態判定
+  regime:
+    adx_period: 14
+    adx_trend_threshold: 25
+    adx_range_threshold: 20
+    bb_period: 20
+    bb_std: 2
+    bb_slope_period: 5
+
+  # ブレイクアウト戦略
+  breakout:
+    donchian_period: 20
+    ema_period: 20
+    rsi_period: 14
+    rsi_long_range: [40, 70]
+    rsi_short_range: [30, 60]
+    volume_multiplier: 1.5
+    atr_period: 14
+    take_profit_atr_mult: 2.0
+    stop_loss_atr_mult: 1.0
+    trailing_stop_atr_mult: 1.0
+    max_hold_hours: 6
+
+  # グリッド戦略（将来実装用）
+  grid:
+    atr_period: 14
+    grid_width_atr_mult: 3.0
+    grid_count: 5
+
+risk:
+  max_risk_per_trade: 0.02
+  daily_loss_limit: 0.05
+  consecutive_loss_cooldown: 3
+  cooldown_minutes: 60
+  max_positions: 2
+  min_leverage: 1.2
+  max_leverage: 2.0
+  bankruptcy_threshold: 30000
+
+capital:
+  initial: 100000
+  profit_take_threshold: 200000
+  profit_take_notify: 150000
+
+notification:
+  sns_topic_arn: "arn:aws:sns:ap-northeast-1:123456789012:crypto-bot-notifications"
+  daily_summary_hour: 9
+  dry_run: true  # trueの場合はSNS送信せずログ出力のみ
+
+logging:
+  level: "INFO"
+  file: "logs/bot.log"
+  max_size_mb: 50
+  backup_count: 5
