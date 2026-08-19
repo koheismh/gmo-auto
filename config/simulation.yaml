@@ -1,0 +1,37 @@
+# モンテカルロシミュレーション設定
+# パラメータを変更して simulate.py を実行することで、異なる条件での期待値を確認できる
+
+simulation:
+  # 基本設定
+  initial_capital: 100000        # 初期資金（円）
+  days: 30                       # シミュレーション期間（日）
+  num_trials: 10000              # 試行回数（多いほど精度UP、時間かかる）
+
+  # トレード特性
+  win_rate: 0.40                 # 勝率（0.0〜1.0）
+  avg_win_pct: 0.04              # 勝ち時の平均利益率（4% = 0.04）
+  avg_loss_pct: 0.02             # 負け時の平均損失率（2% = 0.02）
+  win_std: 0.02                  # 勝ち時の利益率の標準偏差（ばらつき）
+  loss_std: 0.01                 # 負け時の損失率の標準偏差（ばらつき）
+  trades_per_day: 4              # 1日の平均トレード回数
+
+  # 破産・追加投入ルール
+  bankruptcy_threshold: 30000    # この金額以下で破産判定（円）
+  top_up_amount: 100000          # 破産時の追加投入額（円）
+  max_top_ups: 10                # 最大追加投入回数（無限ループ防止）
+
+  # 利益確保ルール
+  profit_take_threshold: 200000  # この金額到達で利益確保（円）
+  profit_take_amount: 100000     # 確保する金額（出金額）
+
+  # レバレッジ
+  leverage: 1.5                  # 実効レバレッジ（損益に掛かる倍率）
+
+# 感度分析用のパラメータセット（simulate.py --sensitivity で使用）
+# 組み合わせ数 = win_rates × avg_win_pcts × avg_loss_pcts × leverages
+# 多すぎると時間がかかるので注意（推奨: 合計64組み合わせ以下）
+sensitivity:
+  win_rates: [0.35, 0.40, 0.45]
+  avg_win_pcts: [0.03, 0.04, 0.05]
+  avg_loss_pcts: [0.02, 0.025]
+  leverages: [1.2, 1.5, 2.0]
