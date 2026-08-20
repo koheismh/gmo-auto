@@ -84,6 +84,7 @@ class TradingEngine:
         self._daily_trades: list = []
         self._daily_summary_sent: bool = False
         self._last_check_time: Optional[datetime] = None
+        self._last_candle_check: Optional[datetime] = None
 
     def start(self):
         """エンジン起動"""
@@ -556,7 +557,8 @@ class TradingEngine:
         """15分足が確定したかチェック"""
         # 15分の区切り（0, 15, 30, 45分）のタイミングで1回だけ処理
         if now.minute % 15 == 0 and now.second < 10:
-            if self._last_check_time is None or (now - self._last_check_time).seconds > 60:
+            if self._last_candle_check is None or (now - self._last_candle_check).seconds > 60:
+                self._last_candle_check = now
                 return True
         return False
 
