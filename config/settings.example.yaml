@@ -19,7 +19,35 @@ strategy:
     bb_std: 2
     bb_slope_period: 5
 
-  # ブレイクアウト戦略
+  # 組み合わせ戦略（EMAトレンド + ボラティリティ拡大 + ADXフィルター）
+  # バックテスト結果: 勝率57.1%, PF=1.56, DD=9.9%, リターン+30.4%/3.5ヶ月
+  # モンテカルロ検証: プラス確率90.3%, 破産確率0%, 純利益平均+24,061円/月
+  combined:
+    # インジケーター期間
+    adx_period: 14
+    bb_period: 20
+    bb_std: 2
+    donchian_period: 20
+    ema_period: 20
+    rsi_period: 14
+    atr_period: 14
+
+    # EMAクロス期間
+    ema_short_period: 9
+    ema_long_period: 26
+
+    # エントリーフィルター
+    adx_entry_threshold: 18    # ADXがこの値以上で上昇中の場合のみエントリー
+    rsi_lower: 35              # RSIがこの範囲内のみエントリー（過熱排除）
+    rsi_upper: 65
+
+    # 決済パラメータ（ATR倍率）
+    take_profit_atr_mult: 12.0   # 利確: ATR × 12
+    stop_loss_atr_mult: 8.0      # 損切り: ATR × 8
+    trailing_stop_atr_mult: 12.0 # トレーリング: ATR × 12（TP60%到達後に発動）
+    max_hold_hours: 24           # 最大保有時間（時間）
+
+  # ブレイクアウト戦略（旧戦略、参考用に残置）
   breakout:
     donchian_period: 20
     ema_period: 20
