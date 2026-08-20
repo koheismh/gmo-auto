@@ -20,7 +20,7 @@ from src.exchange.gmo_websocket import GMOWebSocket
 from src.exchange.models import OrderSide, PositionSide
 from src.notify.sns import SNSNotifier
 from src.risk.manager import RiskManager, RiskConfig
-from src.strategy.indicators import add_all_indicators
+from src.strategy.indicators import add_all_indicators, ema
 from src.strategy.regime import Regime, detect_regime
 
 logger = logging.getLogger(__name__)
@@ -176,11 +176,29 @@ class TradingEngine:
                 if df is None or len(df) < 50:
                     continue
 
-                # インジケーター計算
-                df = add_all_indicators(df, self.strategy_config.get("breakout", {}))
+                # インジケーター計算（基本インジケーター + EMA短期/長期）
+                combined_cfg = self.strategy_config.get("combined", {})
+                indicator_config = {
+                    "adx_period": combined_cfg.get("adx_period", 14),
+                    "bb_period": combined_cfg.get("bb_period", 20),
+                    "bb_std": combined_cfg.get("bb_std", 2),
+                    "donchian_period": combined_cfg.get("donchian_period", 20),
+                    "ema_period": combined_cfg.get("ema_period", 20),
+                    "rsi_period": combined_cfg.get("rsi_period", 14),
+                    "atr_period": combined_cfg.get("atr_period", 14),
+                    "volume_sma_period": 20,
+                }
+                df = add_all_indicators(df, indicator_config)
+
+                # EMA短期(9)/長期(26) を追加（組み合わせ戦略用）
+                ema_short_period = combined_cfg.get("ema_short_period", 9)
+                ema_long_period = combined_cfg.get("ema_long_period", 26)
+                df["ema_short"] = ema(df["close"], ema_short_period)
+                df["ema_long"] = ema(df["close"], ema_long_period)
+
                 self._candle_buffer[symbol] = df
 
-                # 相場状態判定
+                # 相場状態判定（ログ用）
                 regime_cfg = self.strategy_config.get("regime", {})
                 regime = detect_regime(
                     df,
@@ -191,66 +209,88 @@ class TradingEngine:
 
                 logger.info(f"[{symbol}] Regime: {regime.value}, ADX: {df['adx'].iloc[-1]:.1f}")
 
-                # ポジションがなければエントリー判定
+                # ポジションがなければエントリー判定（組み合わせ戦略: 相場状態フィルターなし）
                 if symbol not in self._position_entry_info:
-                    if regime == Regime.TRENDING:
-                        self._check_entry_signal(symbol, df)
+                    self._check_entry_signal(symbol, df)
 
             except Exception as e:
                 logger.error(f"Error processing {symbol}: {e}", exc_info=True)
 
     def _check_entry_signal(self, symbol: str, df: pd.DataFrame):
-        """エントリーシグナルチェック"""
+        """
+        エントリーシグナルチェック - 組み合わせ戦略（EMAトレンド + ボラ拡大 + ADX）
+
+        エントリー条件（全て満たす）:
+        1. EMA短期(9) > 長期(26) ならロング方向、逆ならショート方向
+        2. BB幅が拡大開始（前バーより拡大）
+        3. ADX > 18 かつ上昇中
+        4. 価格がEMA長期の方向と一致する動き
+        5. RSI: 35-65の中間帯（まだ伸びしろがある）
+        """
         # リスクチェック
         can_trade, reason = self.risk_manager.can_trade()
         if not can_trade:
             logger.info(f"[{symbol}] Trade blocked: {reason}")
             return
 
+        if len(df) < 5:
+            return
+
         row = df.iloc[-1]
         prev_row = df.iloc[-2]
-        breakout_cfg = self.strategy_config.get("breakout", {})
+        combined_cfg = self.strategy_config.get("combined", {})
 
-        close = row["close"]
-        dc_upper = prev_row["dc_upper"]
-        dc_lower = prev_row["dc_lower"]
+        # 必要な値を取得
+        ema_short = row.get("ema_short")
+        ema_long = row.get("ema_long")
+        current_adx = row["adx"]
+        prev_adx = prev_row["adx"]
         current_rsi = row["rsi"]
-        current_volume = row["volume"]
-        volume_avg = row["volume_sma"]
+        bb_width = row["bb_width"]
+        prev_bb_width = prev_row["bb_width"]
+        close = row["close"]
         current_atr = row["atr"]
 
-        # EMA方向
-        ema_direction = row["ema"] - df.iloc[-4]["ema"] if len(df) >= 4 else 0
-
         # NaNチェック
-        if any(pd.isna(v) for v in [dc_upper, dc_lower, current_rsi, current_volume, volume_avg, current_atr]):
+        if any(pd.isna(v) for v in [ema_short, ema_long, current_adx, prev_adx,
+                                     current_rsi, bb_width, prev_bb_width, current_atr]):
             return
 
-        if current_atr <= 0 or volume_avg <= 0:
+        if current_atr <= 0:
             return
 
-        # 出来高フィルター
-        vol_mult = breakout_cfg.get("volume_multiplier", 1.5)
-        if current_volume < volume_avg * vol_mult:
+        # --- シグナル判定 ---
+        adx_threshold = combined_cfg.get("adx_entry_threshold", 18)
+        rsi_lower = combined_cfg.get("rsi_lower", 35)
+        rsi_upper = combined_cfg.get("rsi_upper", 65)
+
+        # ADXフィルター: トレンド発生中かつ上昇中
+        if current_adx < adx_threshold or current_adx <= prev_adx:
             return
 
-        # シグナル判定
-        rsi_long = breakout_cfg.get("rsi_long_range", [40, 70])
-        rsi_short = breakout_cfg.get("rsi_short_range", [30, 60])
+        # RSIフィルター: 中間帯（まだ余地がある）
+        if current_rsi < rsi_lower or current_rsi > rsi_upper:
+            return
 
+        # ボラティリティ拡大確認
+        if bb_width <= prev_bb_width:
+            return
+
+        # EMA方向 + 価格位置でシグナル決定
         side = None
-        if close > dc_upper and ema_direction > 0 and rsi_long[0] <= current_rsi <= rsi_long[1]:
+        if ema_short > ema_long and close > ema_long:
             side = OrderSide.BUY
-        elif close < dc_lower and ema_direction < 0 and rsi_short[0] <= current_rsi <= rsi_short[1]:
+        elif ema_short < ema_long and close < ema_long:
             side = OrderSide.SELL
 
         if side is None:
             return
 
-        # ポジションサイズ計算
-        stop_distance = current_atr * breakout_cfg.get("stop_loss_atr_mult", 1.0)
+        # --- ポジションサイズ計算 ---
+        sl_mult = combined_cfg.get("stop_loss_atr_mult", 8.0)
+        stop_distance = current_atr * sl_mult
         adx_value = row["adx"]
-        signal_strength = min(1.0, max(0.0, (adx_value - 25) / 25)) if not pd.isna(adx_value) else 0.5
+        signal_strength = min(1.0, max(0.0, (adx_value - 18) / 30)) if not pd.isna(adx_value) else 0.5
 
         position_size = self.risk_manager.calculate_position_size(
             current_price=close,
@@ -271,7 +311,7 @@ class TradingEngine:
             if position_size < 0.1:
                 return
 
-        # 注文実行
+        # --- 注文実行 ---
         try:
             order_id = self.client.place_market_order(
                 symbol=symbol,
@@ -280,8 +320,7 @@ class TradingEngine:
             )
 
             # ストップ/テイクプロフィット計算
-            tp_mult = breakout_cfg.get("take_profit_atr_mult", 2.0)
-            sl_mult = breakout_cfg.get("stop_loss_atr_mult", 1.0)
+            tp_mult = combined_cfg.get("take_profit_atr_mult", 12.0)
 
             if side == OrderSide.BUY:
                 stop_loss = close - current_atr * sl_mult
@@ -338,8 +377,10 @@ class TradingEngine:
             take_profit = info["take_profit"]
             entry_time = info["entry_time"]
             atr = info["atr"]
-            trailing_mult = self.strategy_config.get("breakout", {}).get("trailing_stop_atr_mult", 1.0)
-            max_hold_hours = self.strategy_config.get("breakout", {}).get("max_hold_hours", 6)
+
+            combined_cfg = self.strategy_config.get("combined", {})
+            trailing_mult = combined_cfg.get("trailing_stop_atr_mult", 12.0)
+            max_hold_hours = combined_cfg.get("max_hold_hours", 24)
 
             exit_reason = None
 
@@ -347,23 +388,37 @@ class TradingEngine:
                 info["max_price"] = max(info["max_price"], current_price)
                 trailing_stop = info["max_price"] - atr * trailing_mult
 
+                # TP距離の60%以上の含み益が出た場合のみトレーリング発動
+                tp_distance = take_profit - entry_price
+                unrealized_profit = info["max_price"] - entry_price
+                trailing_active = tp_distance > 0 and unrealized_profit >= tp_distance * 0.6
+
                 if current_price <= stop_loss:
                     exit_reason = "stop_loss"
                 elif current_price >= take_profit:
                     exit_reason = "take_profit"
-                elif current_price <= trailing_stop and (datetime.now() - entry_time).seconds > 900:
-                    exit_reason = "trailing_stop"
+                elif trailing_active and current_price <= trailing_stop:
+                    hours_held = (datetime.now() - entry_time).total_seconds() / 3600
+                    if hours_held > 1:  # 最低1時間保有後にトレーリング発動
+                        exit_reason = "trailing_stop"
 
             elif side == OrderSide.SELL:
                 info["min_price"] = min(info["min_price"], current_price)
                 trailing_stop = info["min_price"] + atr * trailing_mult
 
+                # TP距離の60%以上の含み益が出た場合のみトレーリング発動
+                tp_distance = entry_price - take_profit
+                unrealized_profit = entry_price - info["min_price"]
+                trailing_active = tp_distance > 0 and unrealized_profit >= tp_distance * 0.6
+
                 if current_price >= stop_loss:
                     exit_reason = "stop_loss"
                 elif current_price <= take_profit:
                     exit_reason = "take_profit"
-                elif current_price >= trailing_stop and (datetime.now() - entry_time).seconds > 900:
-                    exit_reason = "trailing_stop"
+                elif trailing_active and current_price >= trailing_stop:
+                    hours_held = (datetime.now() - entry_time).total_seconds() / 3600
+                    if hours_held > 1:
+                        exit_reason = "trailing_stop"
 
             # タイムアウト
             if exit_reason is None:
