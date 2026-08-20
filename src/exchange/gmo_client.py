@@ -141,8 +141,8 @@ class GMOCoinClient:
             actual_profit_loss=float(data.get("actualProfitLoss", 0)),
             available_amount=float(data.get("availableAmount", 0)),
             margin=float(data.get("margin", 0)),
-            margin_ratio=float(data.get("marginCallStatus", "0") or "0"),
-            profit_loss_ratio=float(data.get("profitLossRatio", 0) or 0),
+            margin_ratio=float(data.get("marginRatio", "0") or "0"),
+            profit_loss_ratio=float(data.get("profitLoss", 0) or 0),
         )
 
     def get_assets(self) -> list[Asset]:
