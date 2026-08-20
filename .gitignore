@@ -18,7 +18,7 @@ env/
 config/settings.yaml
 
 # Data
-data/*.csv
+logs/*.log
 logs/*.log
 
 # OS
