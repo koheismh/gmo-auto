@@ -1,0 +1,32 @@
+[Unit]
+Description=GMO Coin Crypto Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/gmo-auto
+ExecStart=/home/ec2-user/gmo-auto/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StartLimitInterval=300
+StartLimitBurst=5
+
+# 環境変数（必要に応じて）
+# Environment=AWS_DEFAULT_REGION=ap-northeast-1
+
+# ログ
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crypto-bot
+
+# セキュリティ
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ec2-user/gmo-auto/logs /home/ec2-user/gmo-auto/data
+
+[Install]
+WantedBy=multi-user.target
