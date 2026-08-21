@@ -22,7 +22,7 @@ GMOコインのAPIを利用した仮想通貨の自動売買システム。
 | 取引所 | GMOコイン（取引所レバレッジ取引） |
 | インフラ | AWS EC2 (t3.small, Amazon Linux 2023) |
 | 通知 | AWS SNS → メール |
-| データ | WebSocket（リアルタイム）+ REST API（ローソク足） |
+| データ | WebSocket tick→15分足自前構築（主）+ REST API（フォールバック） |
 
 ---
 
@@ -37,21 +37,23 @@ GMOコインのAPIを利用した仮想通貨の自動売買システム。
 │  ┌─────────────┐   ┌──────────────┐   ┌─────────────┐  │
 │  │ Data Layer  │──▶│ Strategy     │──▶│ Execution   │  │
 │  │ (WebSocket  │   │ Engine       │   │ (Orders)    │  │
-│  │  + REST)    │   │              │   │             │  │
+│  │ CandleBuild │   │              │   │             │  │
+│  │ + REST API) │   │              │   │             │  │
 │  └─────────────┘   └──────────────┘   └─────────────┘  │
 │        │                   │                  │         │
 │        ▼                   ▼                  ▼         │
 │  ┌─────────────┐   ┌──────────────┐   ┌─────────────┐  │
-│  │ Local DB    │   │ Risk Manager │   │ AWS SNS     │  │
-│  │ (SQLite)    │   │              │   │ (通知)      │  │
+│  │ Candle      │   │ Risk Manager │   │ AWS SNS     │  │
+│  │ Buffer(200) │   │              │   │ (通知)      │  │
 │  └─────────────┘   └──────────────┘   └─────────────┘  │
 └─────────────────────────────────────────────────────────┘
          │
          ▼
 ┌─────────────────────┐
 │ GMOコイン API        │
-│ - Public REST/WS    │
-│ - Private REST/WS   │
+│ - Public REST       │
+│ - Public WebSocket  │
+│ - Private REST      │
 └─────────────────────┘
 ```
 
@@ -67,7 +69,7 @@ crypto-bot/
 │   ├── exchange/
 │   │   ├── __init__.py
 │   │   ├── gmo_client.py      # REST APIクライアント
-│   │   ├── gmo_websocket.py   # WebSocket接続
+│   │   ├── gmo_websocket.py   # WebSocket接続 + 15分足構築(CandleBuilder)
 │   │   └── models.py          # 注文/ポジション等のデータモデル
 │   ├── strategy/
 │   │   ├── __init__.py
@@ -104,7 +106,59 @@ crypto-bot/
 └── design.md                   # 本ファイル
 ```
 
-### 2.3 メインループ
+### 2.3 データ取得方式
+
+リアルタイムのローソク足データは以下の2系統で冗長化して取得する。
+
+**データソース優先順位:**
+
+| 優先 | ソース | 用途 | 特性 |
+|------|--------|------|------|
+| 1 | WebSocket自前構築 | 直近の15分足（リアルタイム） | 即時性◎、精度は約定数依存 |
+| 2 | Public REST API | 確定済み過去データ（フォールバック） | 精度◎、遅延あり |
+
+**WebSocket 15分足構築（CandleBuilder）:**
+
+```
+┌─────────────────────────────────────────────────────┐
+│ WebSocket (ticker + trades)                          │
+│    ↓ tick (price, volume, timestamp)                 │
+│ CandleBuilder                                        │
+│    ├─ 15分区間に分割 (00-14, 15-29, 30-44, 45-59)   │
+│    ├─ 区間内: OHLCV を逐次更新                       │
+│    ├─ 区間確定: confirmed_candles に追加（最大50本） │
+│    └─ get_realtime_candles() → DataFrame             │
+└─────────────────────────────────────────────────────┘
+```
+
+- tickerチャネルとtradesチャネルの両方からデータを取り込む
+- 約定(trades)のpriceとsizeでOHLCV構築、ticker.lastで補完
+- 15分区間が切り替わった瞬間に前区間の足を確定する
+- WebSocket切断・再接続時に構築中データが失われてもPublic APIでカバー
+
+**Public REST API（フォールバック）:**
+
+```
+GET /v1/klines?symbol=BTC_JPY&interval=15min&date=YYYYMMDD
+```
+
+- 確定済みの足のみ返す（直近15分は未確定のため含まれない）
+- 起動時の初期データ読み込みにも使用
+- WebSocket足が不十分な場合の補完用
+
+**データ結合ロジック（_update_candles）:**
+
+```python
+# 結合順:
+# 1. 既存バッファ（起動時読み込み分）
+# 2. Public APIデータ（確定済み）
+# 3. WebSocket構築足（リアルタイム、keep="last"で優先）
+combined = concat([existing, api_data, ws_candles])
+combined = drop_duplicates(subset=["timestamp"], keep="last")
+combined = sort + tail(200)
+```
+
+### 2.4 メインループ
 
 ```python
 # 概念的なフロー

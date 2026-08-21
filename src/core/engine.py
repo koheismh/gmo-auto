@@ -526,21 +526,71 @@ class TradingEngine:
                 logger.error(f"Failed to load candles for {symbol}: {e}")
 
     def _update_candles(self, symbol: str):
-        """最新ローソク足を取得してバッファに追加"""
+        """
+        最新ローソク足を取得してバッファに追加
+
+        データソース優先順位:
+          1. WebSocketから構築したリアルタイム15分足（最新データ）
+          2. Public API（確定済み過去データ、フォールバック）
+
+        WebSocket足がない場合やデータが少ない場合はPublic APIから取得する。
+        """
         try:
-            today = datetime.now().strftime("%Y%m%d")
-            df = fetch_klines(symbol=symbol, interval="15min", date=today)
-            if df is not None and len(df) > 0:
-                existing = self._candle_buffer.get(symbol)
-                if existing is not None:
-                    # 重複を除去して結合
-                    combined = pd.concat([existing, df], ignore_index=True)
-                    combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
-                    combined = combined.sort_values("timestamp").reset_index(drop=True)
-                    # 直近200本に制限（メモリ節約）
-                    self._candle_buffer[symbol] = combined.tail(200).reset_index(drop=True)
-                else:
-                    self._candle_buffer[symbol] = df
+            existing = self._candle_buffer.get(symbol)
+
+            # --- Source 1: WebSocketから構築した15分足 ---
+            ws_candles = self.ws.get_realtime_candles(symbol)
+            ws_available = ws_candles is not None and len(ws_candles) > 0
+
+            if ws_available:
+                logger.debug(
+                    f"[{symbol}] WebSocket candles: {len(ws_candles)} confirmed bars"
+                )
+
+            # --- Source 2: Public API（フォールバック） ---
+            api_df = None
+            try:
+                today = datetime.now().strftime("%Y%m%d")
+                api_df = fetch_klines(symbol=symbol, interval="15min", date=today)
+            except Exception as e:
+                logger.debug(f"[{symbol}] Public API fetch failed: {e}")
+
+            # --- データ結合 ---
+            dfs_to_merge = []
+
+            # 既存バッファ（起動時に読み込んだ過去データ）
+            if existing is not None and len(existing) > 0:
+                dfs_to_merge.append(existing)
+
+            # Public APIデータ
+            if api_df is not None and len(api_df) > 0:
+                dfs_to_merge.append(api_df)
+
+            # WebSocket構築足（最新のリアルタイムデータ）
+            if ws_available:
+                dfs_to_merge.append(ws_candles)
+
+            if not dfs_to_merge:
+                logger.warning(f"[{symbol}] No candle data available from any source")
+                return
+
+            # 結合・重複除去・ソート
+            combined = pd.concat(dfs_to_merge, ignore_index=True)
+            combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
+            combined = combined.sort_values("timestamp").reset_index(drop=True)
+
+            # 直近200本に制限（メモリ節約）
+            self._candle_buffer[symbol] = combined.tail(200).reset_index(drop=True)
+
+            # データソースのログ（INFOは初回のみ、以後はDEBUG）
+            new_len = len(self._candle_buffer[symbol])
+            if existing is None or len(existing) != new_len:
+                logger.info(
+                    f"[{symbol}] Candles updated: {new_len} bars "
+                    f"(WS: {len(ws_candles) if ws_available else 0}, "
+                    f"API: {len(api_df) if api_df is not None else 0})"
+                )
+
         except Exception as e:
             logger.warning(f"Failed to update candles for {symbol}: {e}")
 
